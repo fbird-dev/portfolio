@@ -1,8 +1,11 @@
 name: Portfolio — GitHub Pages
 
-# Déclenchement manuel uniquement ; aucune publication sur push.
+# Déclenchement manuel et automatique sur push vers main.
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions: {}
 
