@@ -1,0 +1,204 @@
+name: Portfolio — GitHub Pages
+
+# Déclenchement manuel uniquement ; aucune publication sur push.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Récupérer les sources dans un environnement neuf
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: false
+
+      - name: Refuser une sortie de compilation préexistante
+        shell: bash
+        run: |
+          if [ -e dist ] || [ -L dist ]; then
+            echo '::error::dist/ doit être absent avant la compilation CI.'
+            exit 1
+          fi
+
+      - name: Préparer Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Installer les dépendances verrouillées
+        run: npm ci
+
+      - name: Compiler le site
+        shell: bash
+        run: |
+          if [ -e dist ] || [ -L dist ]; then
+            echo '::error::Une sortie dist/ est apparue avant le build.'
+            exit 1
+          fi
+          npm run build
+
+      - name: Contrôler intégralement l’artefact public
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from collections import Counter
+          from hashlib import sha256
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+          import re
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit('Contrôle refusé : ' + message)
+
+          root = Path('dist')
+          require(root.is_dir() and not root.is_symlink(), 'dist/ absent ou symbolique')
+          files = set()
+          for path in root.rglob('*'):
+              require(not path.is_symlink(), 'lien symbolique dans dist/')
+              require(path.is_dir() or path.is_file(), 'type de fichier interdit')
+              if path.is_file():
+                  require(path.stat().st_nlink == 1, 'lien physique dans dist/')
+                  files.add(path.relative_to(root).as_posix())
+
+          pages = {'index.html', 'projet-01.html', 'projet-02.html',
+                   'projet-03.html', 'projet-04.html'}
+          manifest = Path('manifest-images.txt').read_text(encoding='utf-8').splitlines()
+          require(len(manifest) == len(set(manifest)) == 19, 'manifeste invalide')
+          pattern = r'portfolio-projet-0[1-4]-[a-z0-9-]+/[0-9]{2}-[a-z0-9-]+\.webp'
+          require(all(re.fullmatch(pattern, name) for name in manifest),
+                  'chemin inattendu dans le manifeste')
+          groups = Counter(name.split('/')[0].split('-')[2] for name in manifest)
+          require(groups == {'01': 3, '02': 5, '03': 7, '04': 4},
+                  'répartition des illustrations incorrecte')
+          images = {'images/projets/' + name for name in manifest}
+          assets = {name for name in files if name.startswith('assets/')
+                    and Path(name).suffix in {'.css', '.js'}}
+          require(any(name.endswith('.css') for name in assets)
+                  and any(name.endswith('.js') for name in assets),
+                  'ressources CSS ou JavaScript absentes')
+          require(files == pages | images | assets,
+                  'fichier public manquant, privé ou inattendu')
+
+          for name in images:
+              public = Path('public') / name
+              require(public.is_file() and not public.is_symlink(),
+                      'copie publique absente ou symbolique')
+              content = (root / name).read_bytes()
+              require(content[:4] == b'RIFF' and content[8:12] == b'WEBP',
+                      'format WebP invalide')
+              require(sha256(content).digest() == sha256(public.read_bytes()).digest(),
+                      'illustration différente de la copie publique')
+
+          class Page(HTMLParser):
+              def __init__(self, text):
+                  super().__init__()
+                  self.references = []
+                  self.ids = set()
+                  self.feed(text)
+
+              def handle_starttag(self, tag, attributes):
+                  attributes = dict(attributes)
+                  if 'id' in attributes:
+                      self.ids.add(attributes['id'])
+                  for attribute in ('src', 'href'):
+                      if attributes.get(attribute):
+                          self.references.append(attributes[attribute])
+
+          parsed = {name: Page((root / name).read_text(encoding='utf-8'))
+                    for name in pages}
+
+          def resolve(owner, reference):
+              url = urlsplit(reference)
+              require(not url.scheme and not url.netloc and not url.query,
+                      'URL externe ou requête inattendue')
+              path = unquote(url.path)
+              require(not path.startswith('/') and '\\' not in path,
+                      'chemin public non relatif')
+              target = ((root / owner).parent / path).resolve() if path else (root / owner).resolve()
+              require(target.is_relative_to(root.resolve()), 'chemin hors de dist/')
+              name = target.relative_to(root.resolve()).as_posix()
+              require(name in files, 'ressource référencée absente')
+              if url.fragment:
+                  require(name in parsed and unquote(url.fragment) in parsed[name].ids,
+                          'ancre inexistante')
+              return name
+
+          referenced = set()
+          pending = []
+          for name, page in parsed.items():
+              for reference in page.references:
+                  target = resolve(name, reference)
+                  referenced.add(target)
+                  if target in assets:
+                      pending.append(target)
+
+          visited = set()
+          while pending:
+              name = pending.pop()
+              if name in visited:
+                  continue
+              visited.add(name)
+              text = (root / name).read_text(encoding='utf-8')
+              # Dépendances locales des bundles JS et des feuilles de style.
+              references = re.findall(r'''["']((?:\./|\.\./)[^"']+\.(?:js|css|webp))["']''', text)
+              if name.endswith('.css'):
+                  references += re.findall(r'''url\(\s*["']?([^\s"')]+)["']?\s*\)''', text)
+                  references += re.findall(r'''@import\s+["']([^"']+)["']''', text)
+              for reference in references:
+                  target = resolve(name, reference)
+                  referenced.add(target)
+                  if target in assets:
+                      pending.append(target)
+          require(assets <= referenced, 'ancienne ressource CSS/JS non référencée')
+
+          forbidden = re.compile(
+              r'/(?:home|media)/|sources/|GEPSA|Baumettes|France\s+Travail|'
+              r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|'
+              r'\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|'
+              r'AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,})|'
+              r'''(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*["'][^"'\s]{8,}["']''',
+              re.IGNORECASE)
+          for name in pages | assets:
+              require(not forbidden.search((root / name).read_text(encoding='utf-8')),
+                      'mention privée ou secret potentiel dans ' + name)
+
+          print(f'Artefact validé : {len(pages)} pages, {len(images)} WebP identiques, '
+                f'{len(assets)} ressources CSS/JS référencées.')
+          PY
+
+      - name: Charger uniquement l’artefact contrôlé
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configurer GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Publier l’artefact validé
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

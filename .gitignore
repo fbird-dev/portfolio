@@ -1,0 +1,41 @@
+# Dépendances / compilation
+node_modules/
+dist/
+.vite/
+.cache/
+
+# Données et secrets locaux
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.db
+
+# Documents et archives hors publication
+*.zip
+*.7z
+*.bak
+*.tmp
+*~
+*.log
+.DS_Store
+
+# Consignes et utilitaire de revue locales
+AGENTS.md
+scripts/revue_illustrations.py
+
+# Paramétrages IDE
+.vscode/
+.idea/
+
+# Configurations privées et fichiers temporaires supplémentaires
+.npmrc
+.ssh/
+.aws/
+.codex/
+.agents/
+*.tar.gz
+*.swp
